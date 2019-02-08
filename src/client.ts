@@ -46,7 +46,7 @@ interface RequestFunctionOptions<RequestPayloadCodec extends IoTs.Any = IoTs.Und
   span?: Span | SpanContext;
 }
 
-interface RequestFunction<RequestPayloadCodec extends IoTs.Any, ResponsePayloadCodec extends IoTs.Any> {
+export interface RequestFunction<RequestPayloadCodec extends IoTs.Any, ResponsePayloadCodec extends IoTs.Any> {
   (method: HttpMethodKind, path: string, options?: RequestFunctionOptions<RequestPayloadCodec>): Promise<
     RequestFunctionResponse<ResponsePayloadCodec>
   >;
