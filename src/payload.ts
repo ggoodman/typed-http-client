@@ -4,10 +4,20 @@ export class Payload extends ReadableStream.Readable {
   private readonly data: Buffer;
   private position = 0;
 
-  constructor(payload: string, private readonly encoding: string = 'utf8') {
+  constructor(payload: string | string[] | Buffer | Buffer[], private readonly encoding: string = 'utf8') {
     super();
 
-    this.data = Buffer.from(payload);
+    const chunks = ([] as Array<string | Buffer>).concat(payload || '');
+
+    let size = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+
+      chunks[i] = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += chunks[i].length;
+    }
+
+    this.data = Buffer.concat(chunks as Buffer[], size);
   }
 
   _read(size: number) {

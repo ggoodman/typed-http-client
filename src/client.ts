@@ -5,119 +5,75 @@ import * as Stream from 'stream';
 import { URL } from 'url';
 import { promisify } from 'util';
 
-import * as IoTs from 'io-ts';
-import { Span, SpanContext, Tracer } from 'opentracing';
-import { SPAN_KIND, SPAN_KIND_RPC_CLIENT, PEER_ADDRESS, ERROR, SAMPLING_PRIORITY } from 'opentracing/lib/ext/tags';
 import * as ReadableStream from 'readable-stream';
 
 import { getGlobalHttpAgent, getGlobalHttpsAgent } from './agents';
-import { BunyanStyleLogger } from './logger';
-import { ResponseDecodeError, ResponseJsonError } from './errors';
 import { Payload } from './payload';
 import { Reader } from './reader';
-import { Timer } from './timer';
 
 const pipeline = promisify(ReadableStream.pipeline);
 
 export enum HttpMethodKind {
-  GET = 'get',
+  DELETE = 'delete',
   POST = 'post',
   PUT = 'put',
   PATCH = 'patch',
-  DELETE = 'delete',
+  GET = 'get',
+  HEAD = 'get',
   OPTIONS = 'options',
 }
 
-interface CreateRequestFunctionOptions<RequestPayloadCodec extends IoTs.Any, ResponsePayloadCodec extends IoTs.Any> {
-  agent?: Http.Agent | Https.Agent;
+interface HttpClientOptions {
+  agent?: Http.Agent;
   baseUrl?: string;
   headers?: Http.OutgoingHttpHeaders;
-  logger?: BunyanStyleLogger;
-  requestPayloadCodec?: RequestPayloadCodec;
-  responsePayloadCodec?: ResponsePayloadCodec;
-  tracer?: Tracer;
 }
 
-interface RequestFunctionOptions<RequestPayloadCodec extends IoTs.Any = IoTs.UndefinedType> {
-  agent?: Http.Agent | Https.Agent;
+interface HttpClientRequestOptions {
+  agent?: Http.Agent;
   headers?: Http.OutgoingHttpHeaders;
-  logger?: BunyanStyleLogger;
-  payload?: IoTs.TypeOf<RequestPayloadCodec>;
-  span?: Span | SpanContext;
+  payload?: string | string[] | Buffer | Buffer[] | ReadableStream.Readable;
 }
 
-export interface RequestFunction<RequestPayloadCodec extends IoTs.Any, ResponsePayloadCodec extends IoTs.Any> {
-  (method: HttpMethodKind, path: string, options?: RequestFunctionOptions<RequestPayloadCodec>): Promise<
-    RequestFunctionResponse<ResponsePayloadCodec>
-  >;
-}
+class HttpClient {
+  private readonly agent?: Http.Agent;
+  private readonly baseUrl?: string;
+  private readonly headers: Http.OutgoingHttpHeaders;
 
-interface RequestFunctionResponse<ResponsePayloadCodec extends IoTs.Any = IoTs.UndefinedType> {
-  headers: Http.IncomingHttpHeaders;
-  statusCode: number;
-  payload: IoTs.TypeOf<ResponsePayloadCodec>;
-}
+  constructor(options: HttpClientOptions = {}) {
+    this.agent = options.agent;
+    this.baseUrl = options.baseUrl;
+    this.headers = options.headers || {};
+  }
 
-let nextRequestFunctionId = 0;
-let requestCounter = 0;
+  withDefaults(options: HttpClientOptions) {
+    return new HttpClient({
+      agent: options.agent || this.agent,
+      baseUrl: options.baseUrl || this.baseUrl,
+      headers: {
+        ...this.headers,
+        ...options.headers,
+      },
+    });
+  }
 
-export function createRequestFunction<RequestPayloadCodec extends IoTs.Any, ResponsePayloadCodec extends IoTs.Any>(
-  options: CreateRequestFunctionOptions<RequestPayloadCodec, ResponsePayloadCodec> = {}
-): RequestFunction<RequestPayloadCodec, ResponsePayloadCodec> {
-  const baseAgent = options.agent;
-  const baseHeaders = {
-    ...(options.headers || {}),
-    Accept: 'application/json',
-    'Content-Type': 'application/json; charset=utf-8',
-  };
-  const baseUrl = options.baseUrl;
-  const defaultLogger = options.logger;
-  const requestFunctionId = nextRequestFunctionId++;
-  const requestPayloadCodec = options.requestPayloadCodec;
-  const responsePayloadCodec = options.responsePayloadCodec;
-  const tracer = options.tracer;
+  async read(stream: Stream.Readable | ReadableStream.Readable): Promise<Buffer> {
+    const reader = new Reader();
 
-  return async function(
+    await pipeline(stream, reader);
+
+    return reader.collect();
+  }
+
+  async request(
     method: HttpMethodKind,
-    path: string,
-    options: RequestFunctionOptions<RequestPayloadCodec> = {}
-  ): Promise<RequestFunctionResponse<ResponsePayloadCodec>> {
-    const started = Date.now();
-    const id = `${started}:${requestFunctionId}:${requestCounter++}`;
-    const timer = new Timer();
-    const url = new URL(path, baseUrl);
-    const headers = { ...baseHeaders, ...(options.headers || {}) };
-    const parentLogger = options.logger || defaultLogger;
-    const logger = parentLogger ? parentLogger.child({ req: { id, url: url.href } }) : undefined;
+    urlOrPath: string,
+    options: HttpClientRequestOptions = {}
+  ): Promise<Http.ClientResponse> {
+    const url = new URL(urlOrPath, this.baseUrl);
+    const headers = { ...this.headers, ...(options.headers || {}) };
 
-    let payload: IoTs.TypeOf<RequestPayloadCodec>;
-    let jsonPayload: string | undefined = undefined;
-
-    if (requestPayloadCodec) {
-      if (!requestPayloadCodec.is(options.payload)) {
-        const err = new TypeError(`Invalid request payload`);
-
-        if (logger) {
-          logger.warn({ err }, 'invalid request payload');
-        }
-
-        throw err;
-      }
-
-      try {
-        payload = requestPayloadCodec.encode(options.payload);
-        jsonPayload = JSON.stringify(payload);
-      } catch (err) {
-        if (logger) {
-          logger.warn({ err }, 'error stringifying request payload');
-        }
-        throw new Error(`Error encoding request payload as JSON: ${err.message}`);
-      }
-    } else if (options.payload) {
-      throw new TypeError('A payload cannot be supplied without defining a requestPayloadCodec');
-    }
-
-    let agent = baseAgent || options.agent;
+    let agent = options.agent || this.agent;
     let createRequest: typeof Http.request | typeof Https.request;
 
     if (url.protocol === 'http:') {
@@ -134,119 +90,38 @@ export function createRequestFunction<RequestPayloadCodec extends IoTs.Any, Resp
       throw new TypeError(`Unsupported protocol '${url.protocol}'`);
     }
 
-    let requestSpan: Span | undefined = undefined;
+    const req = createRequest({
+      agent,
+      headers,
+      hostname: url.hostname,
+      method,
+      path: url.pathname,
+      port: url.port,
+      search: url.search,
+    });
 
-    if (tracer) {
-      requestSpan = tracer.startSpan(`${method} ${url.href}`, {
-        childOf: options.span,
-        tags: {
-          [SPAN_KIND]: SPAN_KIND_RPC_CLIENT,
-          [PEER_ADDRESS]: url.host,
-        },
-      });
-    }
+    const socket = await resolveWhenSocketAssigned(req);
 
-    try {
-      const req = createRequest({
-        agent,
-        headers,
-        hostname: url.hostname,
-        method,
-        pathname: `${url.pathname}${url.search}`,
-        port: url.port,
-        search: url.search,
-      });
+    await resolveWhenSocketConnected(socket);
 
-      const socket = await resolveWhenSocketAssigned(req);
+    if (options.payload) {
+      const payloadStream =
+        options.payload instanceof ReadableStream.Readable ? options.payload : new Payload(options.payload);
 
-      if (logger) {
-        logger.trace({ latency: timer.elapsedMs() }, 'socket assigned');
-      }
-
-      await resolveWhenSocketConnected(socket);
-
-      if (logger) {
-        logger.trace({ latency: timer.elapsedMs() }, 'socket connected');
-      }
-
-      if (jsonPayload) {
-        const payloadStream = new Payload(jsonPayload);
-
-        ReadableStream.pipeline(payloadStream, req, err => {
-          if (err) {
-            req.emit('error', err);
-          }
-        });
-      } else {
-        req.end();
-      }
-
-      const res = await resolveWhenResponseReceived(req);
-
-      if (logger) {
-        logger.trace({ latency: timer.elapsedMs() }, 'response headers received');
-      }
-
-      if (responsePayloadCodec) {
-        const payload = await read(res, responsePayloadCodec);
-
-        if (logger) {
-          logger.trace({ latency: timer.elapsedMs() }, 'response payload received');
+      ReadableStream.pipeline(payloadStream, req, err => {
+        if (err) {
+          req.emit('error', err);
         }
-
-        return {
-          headers: res.headers,
-          payload,
-          statusCode: res.statusCode || 0,
-        };
-      }
-
-      res.resume();
-
-      return {
-        headers: res.headers,
-        payload: undefined,
-        statusCode: res.statusCode || 0,
-      };
-    } catch (err) {
-      if (requestSpan) {
-        requestSpan.addTags({
-          [ERROR]: true,
-          [SAMPLING_PRIORITY]: 1,
-        });
-      }
-
-      throw err;
-    } finally {
-      if (requestSpan) {
-        requestSpan.finish();
-      }
+      });
+    } else {
+      req.end();
     }
-  };
-}
 
-export async function read<T extends IoTs.Any>(
-  stream: ReadableStream.Readable | Stream.Readable,
-  codec: T
-): Promise<IoTs.TypeOf<T>> {
-  const reader = new Reader();
-
-  await pipeline(stream, reader);
-
-  const resPayloadRaw = reader.collect().toString('utf8');
-
-  let resPayloadJson: any;
-
-  try {
-    resPayloadJson = JSON.parse(resPayloadRaw);
-  } catch (err) {
-    throw new ResponseJsonError(err);
+    return await resolveWhenResponseReceived(req);
   }
-
-  return codec.decode(resPayloadJson).getOrElseL(errors => {
-    throw new ResponseDecodeError(errors);
-  });
 }
+
+export const client = new HttpClient();
 
 function resolveWhenResponseReceived(req: Http.ClientRequest): Promise<Http.ClientResponse> {
   return new Promise((resolve, reject) => {

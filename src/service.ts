@@ -1,5 +1,6 @@
-import { HttpMethodKind } from './client';
-import { t } from '.';
+import * as Http from 'http';
+
+import { client, t, HttpMethodKind } from '.';
 
 export interface ServiceManifest {
   baseUrl: string;
@@ -21,9 +22,15 @@ type ServiceOperationOptions<O extends ServiceOperation> = {
   data: t.TypeOf<O['inputCodec']>;
 };
 
+interface ServiceOperationResult<P> {
+  statusCode: number;
+  headers: Http.IncomingHttpHeaders;
+  payload: P;
+}
+
 type ServiceOperationFunction<O extends ServiceOperation> = (
   options: ServiceOperationOptions<O>
-) => Promise<t.TypeOf<O['outputCodec']>>;
+) => Promise<ServiceOperationResult<t.TypeOf<O['outputCodec']>>>;
 
 export type Service<D extends ServiceManifest> = {
   [O in keyof D['operations']]: ServiceOperationFunction<D['operations'][O]>
@@ -36,19 +43,58 @@ export function createServiceClient<T extends ServiceManifest>(manifest: T): Cli
 }
 
 class Client<T extends ServiceManifest> {
-  constructor(private readonly manifest: T) {}
+  private readonly client: typeof client;
 
-  executeOperation<K extends keyof T['operations']>(
-    operationName: K,
-    _: ServiceOperationOptions<T['operations'][K]>
-  ): t.TypeOf<T['operations'][K]['outputCodec']> {
-    const operation = this.manifest.operations[operationName as string] as T['operations'][K];
-
-    console.log('operation', operationName, this.manifest);
-
-    return operation.outputCodec.decode({}).getOrElseL(_ => {
-      throw new Error('Validation failed');
+  constructor(private readonly manifest: T) {
+    this.client = client.withDefaults({
+      baseUrl: manifest.baseUrl,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
+      },
     });
+  }
+
+  async executeOperation<K extends keyof T['operations']>(
+    operationName: K,
+    options: ServiceOperationOptions<T['operations'][K]>
+  ): Promise<t.TypeOf<T['operations'][K]['outputCodec']>> {
+    const operation = this.manifest.operations[operationName as string] as T['operations'][K];
+    let payload: any = undefined;
+
+    if (operation.inputCodec) {
+      if (!operation.inputCodec.is(options.data)) {
+        throw new TypeError(`Invalid data`);
+      }
+
+      payload = JSON.stringify(operation.inputCodec.encode(options.data));
+    }
+
+    const path = operation.pathTemplate.replace(/\{([^}]+)\}/g, (_, $1) => {
+      return (options.params as any)[$1];
+    });
+    const res = await this.client.request(operation.method, path, {
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
+        'User-Agent': 'typed-http-client',
+      },
+      payload,
+    });
+
+    const resBuffer = await this.client.read(res);
+    const decodedResPayload = operation.outputCodec
+      .decode(JSON.parse(resBuffer.toString('utf8')))
+      .getOrElseL(errors => {
+        console.error(errors);
+        throw new Error('Validation failed');
+      });
+
+    return {
+      headers: res.headers,
+      payload: decodedResPayload,
+      statusCode: res.statusCode,
+    };
   }
 }
 

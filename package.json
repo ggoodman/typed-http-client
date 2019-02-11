@@ -18,7 +18,7 @@
   },
   "homepage": "https://github.com/ggoodman/typed-http-client#readme",
   "dependencies": {
-    "io-ts": "^1.8.1",
+    "io-ts": "^1.8.2",
     "io-ts-types": "^0.4.2",
     "opentracing": "^0.14.3",
     "readable-stream": "^3.1.1"
