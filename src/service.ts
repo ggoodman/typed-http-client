@@ -36,10 +36,20 @@ export type Service<D extends ServiceManifest> = {
   [O in keyof D['operations']]: ServiceOperationFunction<D['operations'][O]>
 };
 
-export function createServiceClient<T extends ServiceManifest>(manifest: T): Client<T> & Service<T> {
-  const serviceClient = new Client(manifest);
+export function createServiceClient<T extends ServiceManifest>(manifest: T): Service<T> {
+  const client = new Client(manifest);
+  const api = Object.keys(manifest.operations).reduce(
+    (proto, operationName: keyof T['operations']) => {
+      proto[operationName] = function(options: ServiceOperationOptions<T['operations'][typeof operationName]>) {
+        return client.executeOperation(operationName, options);
+      };
 
-  return new Proxy(serviceClient, createServiceProxy(manifest)) as Client<T> & Service<T>;
+      return proto;
+    },
+    {} as Service<T>
+  );
+
+  return api;
 }
 
 class Client<T extends ServiceManifest> {
@@ -96,24 +106,4 @@ class Client<T extends ServiceManifest> {
       statusCode: res.statusCode,
     };
   }
-}
-
-function createServiceProxy<T extends ServiceManifest>(manifest: T): ProxyHandler<Client<T>> {
-  return {
-    get<K extends keyof T['operations']>(
-      client: Client<T>,
-      operationName: K,
-      receiver: any
-    ): ServiceOperationFunction<T['operations'][K]> {
-      if (!Object.prototype.hasOwnProperty.call(manifest.operations, operationName)) {
-        return Reflect.get(client, operationName, receiver);
-      }
-
-      return function(
-        options: ServiceOperationOptions<T['operations'][K]>
-      ): t.TypeOf<T['operations'][K]['outputCodec']> {
-        return client.executeOperation(operationName, options);
-      };
-    },
-  };
 }
