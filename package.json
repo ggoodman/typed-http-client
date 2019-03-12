@@ -2,13 +2,13 @@
   "name": "typed-http-client",
   "version": "0.1.0",
   "description": "",
-  "main": "./dist/index.js",
+  "main": "./dist/src/index.js",
   "scripts": {
     "build:clean": "rm -rf dist",
-    "build:tsc": "tsc -p src",
+    "build:tsc": "tsc",
     "build": "npm run build:clean && npm run build:tsc",
     "checkformat": "prettier -c src/**/*.* test/**/*.*",
-    "test": "lab -v --sourcemaps",
+    "test": "lab --transform ./test/lib/typescript.js --verbose --sourcemaps",
     "prepublishOnly": "npm run build && npm run test"
   },
   "repository": {

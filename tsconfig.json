@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "es2018",
     "module": "commonjs",
-    "outDir": "../dist",
+    "outDir": "./dist",
     "declaration": true,
     "downlevelIteration": true,
     "strict": true,
@@ -14,5 +14,6 @@
     "resolveJsonModule": true,
     "sourceMap": true,
     "rootDir": "./"
-  }
+  },
+  "include": ["src"]
 }

@@ -2,6 +2,8 @@ import * as Http from 'http';
 
 import { client, t, HttpMethodKind } from '.';
 
+type FirstParameter<T> = T extends (arg: infer T) => any ? T : never;
+
 export interface ServiceManifest {
   baseUrl: string;
   operations: {
@@ -15,12 +17,17 @@ interface ServiceOperation {
   pathParamCodec?: t.HasProps | t.ExactType<any>;
   inputCodec: t.Any;
   outputCodec: t.Any;
+  mapArguments?: (input: any) => ServiceOperationOptions<ServiceOperation>;
 }
 
 type ServiceOperationOptions<O extends ServiceOperation> = {
   params: O['pathParamCodec'] extends t.Any ? t.TypeOf<O['pathParamCodec']> : never;
   data: t.TypeOf<O['inputCodec']>;
 };
+
+type ServiceOperationInput<O extends ServiceOperation> = 'mapArguments' extends keyof O
+  ? FirstParameter<O['mapArguments']>
+  : ServiceOperationOptions<O>;
 
 interface ServiceOperationResult<P> {
   statusCode: number;
@@ -29,7 +36,7 @@ interface ServiceOperationResult<P> {
 }
 
 type ServiceOperationFunction<O extends ServiceOperation> = (
-  options: ServiceOperationOptions<O>
+  options: ServiceOperationInput<O>
 ) => Promise<ServiceOperationResult<t.TypeOf<O['outputCodec']>>>;
 
 export type Service<D extends ServiceManifest> = {
@@ -40,7 +47,7 @@ export function createServiceClient<T extends ServiceManifest>(manifest: T): Ser
   const client = new Client(manifest);
   const api = Object.keys(manifest.operations).reduce(
     (proto, operationName: keyof T['operations']) => {
-      proto[operationName] = function(options: ServiceOperationOptions<T['operations'][typeof operationName]>) {
+      proto[operationName] = function(options: ServiceOperationInput<T['operations'][typeof operationName]>) {
         return client.executeOperation(operationName, options);
       };
 
@@ -67,9 +74,13 @@ class Client<T extends ServiceManifest> {
 
   async executeOperation<K extends keyof T['operations']>(
     operationName: K,
-    options: ServiceOperationOptions<T['operations'][K]>
+    input: ServiceOperationInput<T['operations'][K]>
   ): Promise<t.TypeOf<T['operations'][K]['outputCodec']>> {
     const operation = this.manifest.operations[operationName as string] as T['operations'][K];
+    const options: ServiceOperationOptions<T['operations'][K]> = operation.mapArguments
+      ? operation.mapArguments(input)
+      : input;
+
     let payload: any = undefined;
 
     if (operation.inputCodec) {

@@ -1,17 +1,14 @@
 //@ts-check
 'use strict';
 
-const Http = require('http');
-const Net = require('net');
+import { expect } from 'code';
+import { script, Flags } from 'lab';
 
-const Code = require('code');
-const Lab = require('lab');
+import { client as httpClient, createServiceClient, t, HttpMethodKind, Reader } from '../';
+import { createHttpServer } from './lib/server';
 
-const { client: httpClient, createServiceClient, t, HttpMethodKind } = require('../');
-
-const lab = (exports.lab = Lab.script());
+const lab = (exports.lab = script());
 const { describe, it } = lab;
-const { expect } = Code;
 
 const webtaskApiOperations = {
   putWebtask: {
@@ -61,7 +58,7 @@ describe('Typed api clients', () => {
     expect(client.putWebtask).to.be.a.function();
   });
 
-  it('will strip excess properties on payload objects with strict codecs', async flags => {
+  it('will strip excess properties on payload objects with strict codecs', async (flags: Flags) => {
     const expectedRequestPayload = {
       code: 'hello world',
     };
@@ -113,7 +110,7 @@ describe('Typed api clients', () => {
     expect(result.payload).to.equal(expectedResponsePayload);
   });
 
-  it('can be constructed from a suitable manifest', async flags => {
+  it('can be constructed from a suitable manifest', async (flags: Flags) => {
     const server = await createHttpServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
@@ -155,29 +152,75 @@ describe('Typed api clients', () => {
     expect(client).to.exist();
     expect(client.putWebtask).to.be.a.function();
   });
-});
 
-/**
- * Create a temporary server
- *
- * @param {(request: Http.IncomingMessage, response: Http.ServerResponse) => void} requestListener
- * @returns {Promise<Http.Server>}
- */
-function createHttpServer(requestListener) {
-  return new Promise((resolve, reject) => {
-    const server = Http.createServer(requestListener);
-    const onError = err => {
-      server.close();
+  describe('with mapArguments', () => {
+    it('can map semantic input arguments those required by the manifest', async (flags: Flags) => {
+      const server = await createHttpServer(async (req, res) => {
+        const data = await httpClient.read(req);
 
-      return reject(err);
-    };
-    const onListening = () => {
-      return resolve(server);
-    };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            method: req.method,
+            path: req.url,
+            payload: JSON.parse(data.toString('utf-8')),
+          })
+        );
+      });
 
-    server
-      .on('error', onError)
-      .on('listening', onListening)
-      .listen(0, '127.0.0.1');
+      flags.onCleanup = async () => server.close();
+
+      const address = server.address();
+      const client = createServiceClient({
+        baseUrl: `http://${address.address}:${address.port}`,
+        operations: {
+          putWebtask: {
+            method: HttpMethodKind.PUT,
+            pathTemplate: '/path/{hello}',
+            inputCodec: t.type({
+              hello: t.string,
+            }),
+            outputCodec: t.type({
+              path: t.literal('/path/world'),
+              method: t.literal('PUT'),
+              // query: t.type({
+              //   hello: t.literal('world')
+              // }),
+              payload: t.type({
+                hello: t.literal('world'),
+              }),
+            }),
+            mapArguments(options: { hello: string }) {
+              return {
+                params: {
+                  hello: options.hello,
+                },
+                data: {
+                  hello: options.hello,
+                },
+              };
+            },
+          },
+        },
+      });
+
+      const result = await client.putWebtask({
+        hello: 'world',
+      });
+
+      expect(result).to.be.an.object();
+      expect(result.statusCode).to.equal(200);
+      // expect(result.headers).to.be.an.object();
+      expect(result.payload).to.equal({
+        method: 'PUT',
+        path: '/path/world',
+        payload: {
+          hello: 'world',
+        },
+      });
+
+      expect(client).to.exist();
+      expect(client.putWebtask).to.be.a.function();
+    });
   });
-}
+});
